@@ -244,9 +244,11 @@ impl SDOCoder {
 
 #[cfg(test)]
 mod tests {
+    use heapless::Vec;
+
     use crate::node::NodeId;
     use crate::object_dictionary::EntryId;
-    use crate::sdo::{SDOCoder, SdoFrame};
+    use crate::sdo::{SDOCoder, SdoAbortCode, SdoFrame};
     use crate::test_types::TestFrame;
 
     #[test]
@@ -275,5 +277,155 @@ mod tests {
                 id: EntryId::new(0x2000, 0x01)
             }
         )
+    }
+
+    #[test]
+    fn test_rx_decode_exp_dl_req() {
+        let frame = TestFrame::new(
+            0x605,
+            &[
+                (1 << 5) + (1 << 1) + 1,
+                0x00,
+                0x20,
+                0x01,
+                0x1,
+                0x2,
+                0x3,
+                0x4,
+            ],
+        );
+        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::ExpeditedDownloadRequest {
+                id: EntryId::new(0x2000, 0x1),
+                payload: Vec::from_slice(&[0x1, 0x2, 0x3, 0x4]).unwrap()
+            }
+        )
+    }
+
+    #[test]
+    fn test_rx_decode_seg_dl_init_req() {
+        let frame = TestFrame::new(0x605, &[(1 << 5) + 1, 0x00, 0x20, 0x01, 0x1, 0x2, 0x3, 0x4]);
+        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedDownloadInitiateRequest {
+                id: EntryId::new(0x2000, 0x1),
+                size: 0x04030201
+            }
+        )
+    }
+
+    #[test]
+    fn test_rx_decode_dl_seg_req() {
+        let mut frame = TestFrame::new(
+            0x605,
+            &[
+                (0 << 5) + (1 << 4) + (3 << 1) + 1,
+                0x00,
+                0x20,
+                0x01,
+                0x55,
+                0x99,
+                0x99,
+                0x99,
+            ],
+        );
+        let mut decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        let mut sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedDownloadRequest {
+                toggle: true,
+                last: true,
+                payload: Vec::from_slice(&[0x00, 0x20, 0x01, 0x55]).unwrap()
+            }
+        );
+
+        frame = TestFrame::new(
+            0x605,
+            &[
+                (0 << 5) + (0 << 4) + (2 << 1) + 0,
+                0x00,
+                0x20,
+                0x01,
+                0x55,
+                0x67,
+                0x99,
+                0x99,
+            ],
+        );
+
+        decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedDownloadRequest {
+                toggle: false,
+                last: false,
+                payload: Vec::from_slice(&[0x00, 0x20, 0x01, 0x55, 0x67]).unwrap()
+            }
+        )
+    }
+
+    #[test]
+    fn test_rx_decode_upload_seg_req() {
+        let frame = TestFrame::new(
+            0x605,
+            &[
+                (3 << 5) + (1 << 4),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
+        );
+        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(sdo, SdoFrame::SegmentedUploadRequest { toggle: true });
+
+        let frame_no_toggle = TestFrame::new(
+            0x605,
+            &[
+                (3 << 5) + (0 << 4),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
+        );
+        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame_no_toggle);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(sdo, SdoFrame::SegmentedUploadRequest { toggle: false })
+    }
+
+    #[test]
+    fn test_rx_decode_abort() {
+        let frame = TestFrame::new(0x605, &[(4 << 5), 0x00, 0x20, 0x05, 0x05, 0x00, 0x04, 0x05]);
+        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::Abort {
+                id: EntryId::new(0x2000, 0x5),
+                code: SdoAbortCode::OutOfMemory
+            }
+        );
     }
 }
