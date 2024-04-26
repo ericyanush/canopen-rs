@@ -1,4 +1,6 @@
-use crate::{parameter_coder::*, pdo::PdoConfiguration};
+use std::process::id;
+
+use crate::{node::NodeId, parameter_coder::*, pdo::PdoConfiguration};
 
 #[derive(Clone, Copy)]
 pub enum VariableType {
@@ -81,6 +83,19 @@ pub struct EntryId {
     sub_index: u8,
 }
 
+impl EntryId {
+    pub fn new(index: u16, sub_index: u8) -> Self {
+        Self { index, sub_index }
+    }
+
+    pub(crate) fn from_bytes(bytes: [u8; 3]) -> Self {
+        Self {
+            index: u16::from_le_bytes(bytes[0..2].try_into().unwrap()),
+            sub_index: bytes[2],
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Variable {
     name: &'static str,
@@ -153,6 +168,7 @@ pub struct ObjectDictionary<
     entries: heapless::Vec<Variable, ENTRY_COUNT>,
     tpdo_mappings: [PdoConfiguration; TPDO_COUNT],
     rpdo_mappings: [PdoConfiguration; RPDO_COUNT],
+    node_id: NodeId,
 }
 
 impl<const ENTRY_COUNT: usize, const RPDO_COUNT: usize, const TPDO_COUNT: usize>
@@ -165,6 +181,7 @@ impl<const ENTRY_COUNT: usize, const RPDO_COUNT: usize, const TPDO_COUNT: usize>
         tpdo_mappings: [PdoConfiguration; TPDO_COUNT],
         rpdo_mappings: [PdoConfiguration; RPDO_COUNT],
         entries: heapless::Vec<Variable, ENTRY_COUNT>,
+        node_id: NodeId,
     ) -> Self {
         let mut e = entries;
         e.sort_by_key(|v| v.id);
@@ -176,6 +193,7 @@ impl<const ENTRY_COUNT: usize, const RPDO_COUNT: usize, const TPDO_COUNT: usize>
             entries: e,
             tpdo_mappings,
             rpdo_mappings,
+            node_id,
         }
     }
 
@@ -191,7 +209,7 @@ impl<const ENTRY_COUNT: usize, const RPDO_COUNT: usize, const TPDO_COUNT: usize>
 mod tests {
     use heapless::Vec;
 
-    use crate::object_dictionary::ObjectDictionary;
+    use crate::{node::NodeId, object_dictionary::ObjectDictionary};
 
     #[test]
     fn it_works() {
@@ -202,6 +220,7 @@ mod tests {
             [Default::default(); 8],
             [Default::default(); 8],
             Vec::<_, 0>::from_slice(&[]).unwrap(),
+            NodeId::default(),
         );
     }
 }

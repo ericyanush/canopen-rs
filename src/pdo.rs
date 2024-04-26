@@ -30,6 +30,7 @@ pub struct PdoConfiguration {
     transmission_type: PdoTransmissionType,
     number_of_map_values: u8,
     entry_mapping: [PdoEntryMapping; 8],
+    event_timer_ms: u16,
 }
 
 impl PdoConfiguration {
@@ -38,12 +39,14 @@ impl PdoConfiguration {
         transmission_type: PdoTransmissionType,
         mapped_val_count: u8,
         entry_mapping: [PdoEntryMapping; 8],
+        event_timer_ms: u16,
     ) -> Self {
         Self {
             cob_id: id,
             transmission_type: transmission_type,
             number_of_map_values: mapped_val_count,
             entry_mapping: entry_mapping,
+            event_timer_ms: event_timer_ms,
         }
     }
 }
@@ -55,6 +58,7 @@ impl Default for PdoConfiguration {
             transmission_type: PdoTransmissionType::EventDriven,
             number_of_map_values: 0,
             entry_mapping: Default::default(),
+            event_timer_ms: 0,
         }
     }
 }
