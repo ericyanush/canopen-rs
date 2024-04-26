@@ -3,7 +3,7 @@ use heapless::Vec;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
 
-use crate::{node::NodeId, object_dictionary::EntryId};
+use crate::{frame::EncodedCANOpenFrame, node::NodeId, object_dictionary::EntryId};
 
 #[derive(FromPrimitive, ToPrimitive, Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -246,28 +246,28 @@ impl SDOCoder {
 mod tests {
     use heapless::Vec;
 
+    use crate::frame::EncodedCANOpenFrame;
     use crate::node::NodeId;
     use crate::object_dictionary::EntryId;
     use crate::sdo::{SDOCoder, SdoAbortCode, SdoFrame};
-    use crate::test_types::TestFrame;
 
     #[test]
     fn test_rx_decode_wrong_node_id() {
-        let frame = TestFrame::new(0x606, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
+        let frame = EncodedCANOpenFrame::new(0x606, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
         let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
         assert!(decoded.is_none());
     }
 
     #[test]
     fn test_rx_decode_wrong_frame_offset() {
-        let frame = TestFrame::new(0x585, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
+        let frame = EncodedCANOpenFrame::new(0x585, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
         let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
         assert!(decoded.is_none());
     }
 
     #[test]
     fn test_rx_decode_upload_req() {
-        let frame = TestFrame::new(0x605, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
+        let frame = EncodedCANOpenFrame::new(0x605, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
         let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_rx_decode_exp_dl_req() {
-        let frame = TestFrame::new(
+        let frame = EncodedCANOpenFrame::new(
             0x605,
             &[
                 (1 << 5) + (1 << 1) + 1,
@@ -308,7 +308,8 @@ mod tests {
 
     #[test]
     fn test_rx_decode_seg_dl_init_req() {
-        let frame = TestFrame::new(0x605, &[(1 << 5) + 1, 0x00, 0x20, 0x01, 0x1, 0x2, 0x3, 0x4]);
+        let frame =
+            EncodedCANOpenFrame::new(0x605, &[(1 << 5) + 1, 0x00, 0x20, 0x01, 0x1, 0x2, 0x3, 0x4]);
         let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
@@ -323,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_rx_decode_dl_seg_req() {
-        let mut frame = TestFrame::new(
+        let mut frame = EncodedCANOpenFrame::new(
             0x605,
             &[
                 (0 << 5) + (1 << 4) + (3 << 1) + 1,
@@ -348,7 +349,7 @@ mod tests {
             }
         );
 
-        frame = TestFrame::new(
+        frame = EncodedCANOpenFrame::new(
             0x605,
             &[
                 (0 << 5) + (0 << 4) + (2 << 1) + 0,
@@ -377,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_rx_decode_upload_seg_req() {
-        let frame = TestFrame::new(
+        let frame = EncodedCANOpenFrame::new(
             0x605,
             &[
                 (3 << 5) + (1 << 4),
@@ -395,7 +396,7 @@ mod tests {
         let sdo = decoded.unwrap();
         assert_eq!(sdo, SdoFrame::SegmentedUploadRequest { toggle: true });
 
-        let frame_no_toggle = TestFrame::new(
+        let frame_no_toggle = EncodedCANOpenFrame::new(
             0x605,
             &[
                 (3 << 5) + (0 << 4),
@@ -416,7 +417,8 @@ mod tests {
 
     #[test]
     fn test_rx_decode_abort() {
-        let frame = TestFrame::new(0x605, &[(4 << 5), 0x00, 0x20, 0x05, 0x05, 0x00, 0x04, 0x05]);
+        let frame =
+            EncodedCANOpenFrame::new(0x605, &[(4 << 5), 0x00, 0x20, 0x05, 0x05, 0x00, 0x04, 0x05]);
         let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
