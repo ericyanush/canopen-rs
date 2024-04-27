@@ -1,7 +1,7 @@
-use embedded_can::{Frame, Id};
+use embedded_can::{Frame, Id, StandardId};
 use heapless::Vec;
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, ToBytes};
 
 use crate::{frame::EncodedCANOpenFrame, node::NodeId, object_dictionary::EntryId};
 
@@ -80,6 +80,8 @@ pub enum SdoFrame {
         toggle: bool,
     },
     SegmentedUploadResponse {
+        toggle: bool,
+        last: bool,
         payload: Vec<u8, 7>,
     },
     SegmentedDownloadInitiateRequest {
@@ -103,6 +105,8 @@ pub enum SdoFrame {
     },
 }
 
+trait SdoCommand: Into<u8> {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientCommand {
     ExpeditedDownload {
@@ -120,6 +124,26 @@ enum ClientCommand {
     },
     Abort,
 }
+
+impl Into<u8> for ClientCommand {
+    fn into(self) -> u8 {
+        match self {
+            ClientCommand::ExpeditedDownload { length } => {
+                (1 << 5) + ((4 - length) << 2) + (1 << 1) + 1
+            }
+            ClientCommand::InitiateSegmentedDownload => (1 << 5) + (0 << 2) + (0 << 1) + 1,
+            ClientCommand::DownloadSegmentRequest {
+                toggle,
+                length,
+                last_seg,
+            } => (0 << 5) + ((toggle as u8) << 4) + ((7 - length) << 1) + last_seg as u8,
+            ClientCommand::InitiateUpload => 2 << 5,
+            ClientCommand::UploadSegmentRequest { toggle } => (3 << 5) + ((toggle as u8) << 4),
+            ClientCommand::Abort => 4 << 5,
+        }
+    }
+}
+impl SdoCommand for ClientCommand {}
 
 struct InvalidCommandCode;
 impl TryFrom<u8> for ClientCommand {
@@ -177,13 +201,18 @@ impl Into<u8> for ServerCommand {
     }
 }
 
+impl SdoCommand for ServerCommand {}
+
 pub(crate) struct SDOCoder;
 
 impl SDOCoder {
-    const RX_ID_OFFSET: u16 = 0x600;
-    const TX_ID_OFFSET: u16 = 0x580;
+    pub const RX_ID_OFFSET: u16 = 0x600;
+    pub const TX_ID_OFFSET: u16 = 0x580;
 
-    fn try_decode_rx_frame(self_node_id: NodeId, frame: &impl Frame) -> Option<SdoFrame> {
+    pub(crate) fn try_decode_rx_frame(
+        self_node_id: NodeId,
+        frame: &impl Frame,
+    ) -> Option<SdoFrame> {
         match frame.id() {
             Id::Standard(std) => {
                 if std.as_raw() != (self_node_id.raw() as u16 + Self::RX_ID_OFFSET) {
@@ -239,6 +268,118 @@ impl SDOCoder {
                 }),
             },
         };
+    }
+
+    pub(crate) fn encode_tx_frame(tx_id: Id, sdo_frame: SdoFrame) -> EncodedCANOpenFrame {
+        match sdo_frame {
+            SdoFrame::UploadRequest { id } => {
+                Self::build_tx_sdo_frame::<0>(tx_id, ClientCommand::InitiateUpload, Some(id), None)
+            }
+            SdoFrame::ExpeditedDownloadRequest { id, payload } => Self::build_tx_sdo_frame(
+                tx_id,
+                ClientCommand::ExpeditedDownload {
+                    length: payload.len() as u8,
+                },
+                Some(id),
+                Some(payload),
+            ),
+            SdoFrame::ExpeditedDownloadResponse { id } => Self::build_tx_sdo_frame::<0>(
+                tx_id,
+                ServerCommand::InitiateDownloadResponse,
+                Some(id),
+                None,
+            ),
+            SdoFrame::ExpeditedUploadResponse { id, payload } => Self::build_tx_sdo_frame(
+                tx_id,
+                ServerCommand::UploadInitiateExpeditedResponse(payload.len() as u8),
+                Some(id),
+                Some(payload),
+            ),
+            SdoFrame::SegmentedUploadInitiateResponse { id, size } => Self::build_tx_sdo_frame(
+                tx_id,
+                ServerCommand::UploadInitiateSegmentedResponse,
+                Some(id),
+                Vec::<u8, 4>::from_slice(&size.to_le_bytes()).ok(),
+            ),
+            SdoFrame::SegmentedUploadRequest { toggle } => Self::build_tx_sdo_frame::<0>(
+                tx_id,
+                ClientCommand::UploadSegmentRequest { toggle: toggle },
+                None,
+                None,
+            ),
+            SdoFrame::SegmentedUploadResponse {
+                toggle,
+                last,
+                payload,
+            } => Self::build_tx_sdo_frame(
+                tx_id,
+                ServerCommand::UploadSegmentResponse {
+                    toggle: toggle,
+                    length: payload.len() as u8,
+                    last: last,
+                },
+                None,
+                Some(payload),
+            ),
+            SdoFrame::SegmentedDownloadInitiateRequest { id, size } => Self::build_tx_sdo_frame(
+                tx_id,
+                ClientCommand::InitiateSegmentedDownload,
+                Some(id),
+                Vec::<u8, 4>::from_slice(&size.to_le_bytes()).ok(),
+            ),
+            SdoFrame::SegmentedDownloadInitiateResponse { id } => Self::build_tx_sdo_frame::<0>(
+                tx_id,
+                ServerCommand::InitiateDownloadResponse,
+                Some(id),
+                None,
+            ),
+            SdoFrame::SegmentedDownloadRequest {
+                toggle,
+                last,
+                payload,
+            } => Self::build_tx_sdo_frame(
+                tx_id,
+                ClientCommand::DownloadSegmentRequest {
+                    toggle: toggle,
+                    length: payload.len() as u8,
+                    last_seg: last,
+                },
+                None,
+                Some(payload),
+            ),
+            SdoFrame::SegmentedDownloadResponse { toggle } => Self::build_tx_sdo_frame::<0>(
+                tx_id,
+                ServerCommand::DownloadSegmentResponse(toggle),
+                None,
+                None,
+            ),
+            SdoFrame::Abort { id, code } => Self::build_tx_sdo_frame(
+                tx_id,
+                ServerCommand::Abort,
+                Some(id),
+                Vec::<u8, 4>::from_slice(&code.to_le_bytes()).ok(),
+            ),
+        }
+    }
+
+    fn build_tx_sdo_frame<const PAYLOAD_LEN: usize>(
+        id: Id,
+        command: impl SdoCommand,
+        entry_id: Option<EntryId>,
+        data: Option<Vec<u8, PAYLOAD_LEN>>,
+    ) -> EncodedCANOpenFrame {
+        let mut payload = Vec::<u8, 8>::new();
+        payload.push(command.into()).unwrap();
+
+        if let Some(id) = entry_id {
+            payload.as_mut_slice()[1..4].copy_from_slice(&id.to_le_bytes())
+        }
+
+        if let Some(data) = data {
+            payload[8 - data.len()..8].copy_from_slice(data.as_slice());
+        }
+
+        EncodedCANOpenFrame::from_vec_data(id, payload)
     }
 }
 

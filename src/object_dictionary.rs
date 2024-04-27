@@ -1,5 +1,7 @@
 use std::process::id;
 
+use num_traits::ToBytes;
+
 use crate::{node::NodeId, parameter_coder::*, pdo::PdoConfiguration};
 
 #[derive(Clone, Copy)]
@@ -93,6 +95,13 @@ impl EntryId {
             index: u16::from_le_bytes(bytes[0..2].try_into().unwrap()),
             sub_index: bytes[2],
         }
+    }
+
+    pub(crate) fn to_le_bytes(&self) -> [u8; 3] {
+        let mut bytes = [0; 3];
+        bytes[0..2].copy_from_slice(&self.index.to_le_bytes());
+        bytes[2] = self.sub_index;
+        bytes
     }
 }
 

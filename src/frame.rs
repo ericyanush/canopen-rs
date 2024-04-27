@@ -42,6 +42,15 @@ impl Frame for EncodedCANOpenFrame {
     }
 }
 
+impl EncodedCANOpenFrame {
+    pub(crate) fn from_vec_data(id: impl Into<Id>, data: Vec<u8, 8>) -> Self {
+        Self {
+            id: id.into(),
+            data: data,
+        }
+    }
+}
+
 #[cfg(test)]
 impl EncodedCANOpenFrame {
     pub(crate) fn new(std_id: u16, data: &[u8]) -> Self {
