@@ -1,7 +1,7 @@
-use embedded_can::{Frame, Id, StandardId};
+use embedded_can::{Frame, Id};
 use heapless::Vec;
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::{FromPrimitive, ToBytes};
+use num_traits::FromPrimitive;
 
 use crate::{frame::EncodedCANOpenFrame, node::NodeId, object_dictionary::EntryId};
 
@@ -65,7 +65,7 @@ pub enum SdoFrame {
         id: EntryId,
         payload: Vec<u8, 4>,
     },
-    ExpeditedDownloadResponse {
+    DownloadInitiateResponse {
         id: EntryId,
     },
     ExpeditedUploadResponse {
@@ -87,9 +87,6 @@ pub enum SdoFrame {
     SegmentedDownloadInitiateRequest {
         id: EntryId,
         size: u32,
-    },
-    SegmentedDownloadInitiateResponse {
-        id: EntryId,
     },
     SegmentedDownloadRequest {
         toggle: bool,
@@ -224,6 +221,11 @@ impl TryFrom<u8> for ServerCommand {
 
 impl SdoCommand for ServerCommand {}
 
+pub(crate) enum SDORole {
+    Server,
+    Client,
+}
+
 pub(crate) struct SDOCoder;
 
 impl SDOCoder {
@@ -232,6 +234,7 @@ impl SDOCoder {
 
     pub(crate) fn try_decode_rx_frame(
         self_node_id: NodeId,
+        node_role: SDORole,
         frame: &impl Frame,
     ) -> Option<SdoFrame> {
         match frame.id() {
@@ -248,6 +251,13 @@ impl SDOCoder {
         }
 
         let frame_data = frame.data();
+        match node_role {
+            SDORole::Server => Self::try_decode_rx_frame_from_client(frame_data),
+            SDORole::Client => Self::try_decode_rx_frame_from_server(frame_data),
+        }
+    }
+
+    fn try_decode_rx_frame_from_client(frame_data: &[u8]) -> Option<SdoFrame> {
         return match ClientCommand::try_from(frame_data[0]) {
             Err(_) => None,
             Ok(ClientCommand::ExpeditedDownload { length }) => {
@@ -291,6 +301,48 @@ impl SDOCoder {
         };
     }
 
+    fn try_decode_rx_frame_from_server(frame_data: &[u8]) -> Option<SdoFrame> {
+        return match ServerCommand::try_from(frame_data[0]) {
+            Err(_) => None,
+            Ok(ServerCommand::Abort) => match SdoAbortCode::from_le_bytes(&frame_data[4..8]) {
+                None => None,
+                Some(code) => Some(SdoFrame::Abort {
+                    id: EntryId::from_bytes(frame_data[1..4].try_into().unwrap()),
+                    code: code,
+                }),
+            },
+            Ok(ServerCommand::DownloadSegmentResponse(toggle)) => {
+                Some(SdoFrame::SegmentedDownloadResponse { toggle: toggle })
+            }
+            Ok(ServerCommand::InitiateDownloadResponse) => {
+                Some(SdoFrame::DownloadInitiateResponse {
+                    id: EntryId::from_bytes(frame_data[1..4].try_into().unwrap()),
+                })
+            }
+            Ok(ServerCommand::UploadInitiateExpeditedResponse(size)) => {
+                Some(SdoFrame::ExpeditedUploadResponse {
+                    id: EntryId::from_bytes(frame_data[1..4].try_into().unwrap()),
+                    payload: Vec::<u8, 4>::from_slice(&frame_data[4..(4 + size as usize)]).unwrap(),
+                })
+            }
+            Ok(ServerCommand::UploadInitiateSegmentedResponse) => {
+                Some(SdoFrame::SegmentedUploadInitiateResponse {
+                    id: EntryId::from_bytes(frame_data[1..4].try_into().unwrap()),
+                    size: u32::from_le_bytes(frame_data[4..8].try_into().unwrap()),
+                })
+            }
+            Ok(ServerCommand::UploadSegmentResponse {
+                toggle,
+                length,
+                last,
+            }) => Some(SdoFrame::SegmentedUploadResponse {
+                toggle: toggle,
+                last: last,
+                payload: Vec::<u8, 7>::from_slice(&frame_data[1..(1 + length as usize)]).unwrap(),
+            }),
+        };
+    }
+
     pub(crate) fn encode_tx_frame(tx_id: Id, sdo_frame: SdoFrame) -> EncodedCANOpenFrame {
         match sdo_frame {
             SdoFrame::UploadRequest { id } => {
@@ -304,7 +356,7 @@ impl SDOCoder {
                 Some(id),
                 Some(payload),
             ),
-            SdoFrame::ExpeditedDownloadResponse { id } => Self::build_tx_sdo_frame::<0>(
+            SdoFrame::DownloadInitiateResponse { id } => Self::build_tx_sdo_frame::<0>(
                 tx_id,
                 ServerCommand::InitiateDownloadResponse,
                 Some(id),
@@ -347,12 +399,6 @@ impl SDOCoder {
                 ClientCommand::InitiateSegmentedDownload,
                 Some(id),
                 Vec::<u8, 4>::from_slice(&size.to_le_bytes()).ok(),
-            ),
-            SdoFrame::SegmentedDownloadInitiateResponse { id } => Self::build_tx_sdo_frame::<0>(
-                tx_id,
-                ServerCommand::InitiateDownloadResponse,
-                Some(id),
-                None,
             ),
             SdoFrame::SegmentedDownloadRequest {
                 toggle,
@@ -421,20 +467,22 @@ mod tests {
     use crate::frame::EncodedCANOpenFrame;
     use crate::node::NodeId;
     use crate::object_dictionary::EntryId;
-    use crate::sdo::{SDOCoder, SdoAbortCode, SdoFrame};
+    use crate::sdo::{SDOCoder, SDORole, SdoAbortCode, SdoFrame};
 
     // Receive Decoding Tests
     #[test]
     fn test_rx_decode_wrong_node_id() {
         let frame = EncodedCANOpenFrame::new(0x606, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_none());
     }
 
     #[test]
     fn test_rx_decode_wrong_frame_offset() {
         let frame = EncodedCANOpenFrame::new(0x585, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_none());
     }
 
@@ -453,7 +501,8 @@ mod tests {
                 0x4,
             ],
         );
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(
@@ -469,7 +518,8 @@ mod tests {
     fn test_rx_decode_seg_dl_init_req() {
         let frame =
             EncodedCANOpenFrame::new(0x605, &[(1 << 5) + 1, 0x00, 0x20, 0x01, 0x1, 0x2, 0x3, 0x4]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(
@@ -485,13 +535,14 @@ mod tests {
     fn test_rx_decode_exp_dl_resp() {
         let frame =
             EncodedCANOpenFrame::new(0x605, &[(3 << 5), 0x00, 0x20, 0x1, 0x0, 0x0, 0x0, 0x0]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
 
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(
             sdo,
-            SdoFrame::ExpeditedDownloadResponse {
+            SdoFrame::DownloadInitiateResponse {
                 id: EntryId::new(0x2000, 0x1)
             }
         );
@@ -512,7 +563,8 @@ mod tests {
                 0x99,
             ],
         );
-        let mut decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         let mut sdo = decoded.unwrap();
         assert_eq!(
@@ -538,7 +590,7 @@ mod tests {
             ],
         );
 
-        decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         sdo = decoded.unwrap();
         assert_eq!(
@@ -552,9 +604,37 @@ mod tests {
     }
 
     #[test]
+    fn test_rx_decode_dl_seg_resp() {
+        let mut frame = EncodedCANOpenFrame::new(
+            0x605,
+            &[
+                (1 << 5) + (1 << 4),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
+        );
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
+        assert!(decoded.is_some());
+        let mut sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedDownloadResponse {
+                toggle: true
+            }
+        );
+    }
+
+    #[test]
     fn test_rx_decode_upload_req() {
         let frame = EncodedCANOpenFrame::new(0x605, &[2 << 5, 0x00, 0x20, 0x01, 0, 0, 0, 0]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(
@@ -563,6 +643,62 @@ mod tests {
                 id: EntryId::new(0x2000, 0x01)
             }
         )
+    }
+
+    #[test]
+    fn test_rx_upload_init_exp_resp() {
+        let mut frame = EncodedCANOpenFrame::new(
+            0x605,
+            &[
+                (2 << 5) + (1 << 2) + (1 << 1) + 1,
+                0x00,
+                0x20,
+                0x01,
+                0x55,
+                0x99,
+                0x88,
+                0x77,
+            ],
+        );
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
+        assert!(decoded.is_some());
+        let mut sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::ExpeditedUploadResponse {
+                id: EntryId::new(0x2000, 0x01),
+                payload: Vec::from_slice(&[0x55, 0x99, 0x88]).unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn test_rx_upload_init_seg_resp() {
+        let mut frame = EncodedCANOpenFrame::new(
+            0x605,
+            &[
+                (2 << 5) + (1 << 2) + (0 << 1) + 1,
+                0x00,
+                0x20,
+                0x01,
+                0x55,
+                0x99,
+                0x88,
+                0x77,
+            ],
+        );
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
+        assert!(decoded.is_some());
+        let mut sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedUploadInitiateResponse {
+                id: EntryId::new(0x2000, 0x01),
+                size: 0x77889955
+            }
+        );
     }
 
     #[test]
@@ -580,7 +716,8 @@ mod tests {
                 0x00,
             ],
         );
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(sdo, SdoFrame::SegmentedUploadRequest { toggle: true });
@@ -598,17 +735,62 @@ mod tests {
                 0x00,
             ],
         );
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame_no_toggle);
+        let decoded = SDOCoder::try_decode_rx_frame(
+            NodeId::new(5).unwrap(),
+            SDORole::Server,
+            &frame_no_toggle,
+        );
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(sdo, SdoFrame::SegmentedUploadRequest { toggle: false })
     }
 
     #[test]
-    fn test_rx_decode_abort() {
+    fn test_rx_decode_upload_seg_resp() {
+        let mut frame = EncodedCANOpenFrame::new(
+            0x605,
+            &[
+                (0 << 5) + (1 << 4) + (1 << 1) + 0,
+                0x00,
+                0x20,
+                0x01,
+                0x55,
+                0x99,
+                0x88,
+                0x77,
+            ],
+        );
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
+        assert!(decoded.is_some());
+        let mut sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::SegmentedUploadResponse {
+                toggle: true,
+                last: false,
+                payload: Vec::from_slice(&[0x00, 0x20, 0x01, 0x55, 0x99, 0x88]).unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn test_rx_decode_client_abort() {
         let frame =
             EncodedCANOpenFrame::new(0x605, &[(4 << 5), 0x00, 0x20, 0x05, 0x05, 0x00, 0x04, 0x05]);
-        let decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), &frame);
+        let mut decoded =
+            SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Server, &frame);
+        assert!(decoded.is_some());
+        let sdo = decoded.unwrap();
+        assert_eq!(
+            sdo,
+            SdoFrame::Abort {
+                id: EntryId::new(0x2000, 0x5),
+                code: SdoAbortCode::OutOfMemory
+            }
+        );
+
+        decoded = SDOCoder::try_decode_rx_frame(NodeId::new(5).unwrap(), SDORole::Client, &frame);
         assert!(decoded.is_some());
         let sdo = decoded.unwrap();
         assert_eq!(
@@ -682,31 +864,13 @@ mod tests {
         let tx_id = embedded_can::Id::Standard(StandardId::new(0x585).unwrap());
         let encoded = SDOCoder::encode_tx_frame(
             tx_id,
-            SdoFrame::ExpeditedDownloadResponse {
+            SdoFrame::DownloadInitiateResponse {
                 id: EntryId::new(0x2000, 0x5),
             },
         );
         assert_eq!(encoded.id(), tx_id);
         assert_eq!(encoded.dlc(), 8);
         assert_eq!(encoded.data(), [(3 << 5), 0x00, 0x20, 0x05, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn test_tx_encode_seg_dl_init_resp() {
-        let tx_id = Id::Standard(StandardId::new(0x585).unwrap());
-        let encoded = SDOCoder::encode_tx_frame(
-            tx_id,
-            SdoFrame::SegmentedDownloadInitiateResponse {
-                id: EntryId::new(0x2000, 0x1),
-            },
-        );
-
-        assert_eq!(encoded.id(), tx_id);
-        assert_eq!(encoded.dlc(), 8);
-        assert_eq!(
-            encoded.data(),
-            [(3 << 5), 0x00, 0x20, 0x1, 0x0, 0x0, 0x0, 0x0]
-        );
     }
 
     #[test]
